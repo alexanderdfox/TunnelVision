@@ -11,6 +11,12 @@ Connection: close\r
 \r
 """
 
+enum LogicGate: String {
+    case and = "AND", or = "OR", xor = "XOR"
+    case nand = "NAND", nor = "NOR", xnor = "XNOR"
+    case not = "NOT"
+}
+
 func sha256(_ input: String) -> String {
     let digest = SHA256.hash(data: Data(input.utf8))
     return digest.map { String(format: "%02x", $0) }.joined()
@@ -18,7 +24,7 @@ func sha256(_ input: String) -> String {
 
 func connectViaInterface(interface: String, label: String, completion: @escaping (String?) -> Void) {
     let params = NWParameters.tls
-    params.requiredInterfaceType = .other // avoid .wifi or .cellular
+    params.requiredInterfaceType = .other
     if let iface = NWInterface(interfaceName: interface, type: .other) {
         params.requiredInterface = iface
     }
@@ -46,7 +52,7 @@ func connectViaInterface(interface: String, label: String, completion: @escaping
 
     conn.start(queue: .global())
 
-    conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+    conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
         if let data = data, let response = String(data: data, encoding: .utf8) {
             print("[\(label)] Received response.")
             completion(response)
@@ -58,45 +64,72 @@ func connectViaInterface(interface: String, label: String, completion: @escaping
     }
 }
 
-func runAndLogic() {
+func evaluateGate(_ gate: LogicGate, hash1: String?, hash2: String?) -> Bool {
+    let a = hash1 != nil
+    let b = hash2 != nil
+    let match = (hash1 == hash2)
+
+    switch gate {
+    case .and:   return a && b && match
+    case .or:    return a || b
+    case .xor:   return a != b
+    case .nand:  return !(a && b && match)
+    case .nor:   return !(a || b)
+    case .xnor:  return a == b && match
+    case .not:   return !a // special: NOT VPN1
+    }
+}
+
+func runLogicGateTest(_ gate: LogicGate) {
     let group = DispatchGroup()
     var res1: String?
     var res2: String?
 
-    group.enter()
-    connectViaInterface(interface: "utun0", label: "VPN1") { result in
-        res1 = result
-        group.leave()
-    }
+    if gate == .not {
+        // Unary test
+        group.enter()
+        connectViaInterface(interface: "utun0", label: "VPN1") { result in
+            res1 = result
+            group.leave()
+        }
+    } else {
+        group.enter()
+        connectViaInterface(interface: "utun0", label: "VPN1") { result in
+            res1 = result
+            group.leave()
+        }
 
-    group.enter()
-    connectViaInterface(interface: "utun1", label: "VPN2") { result in
-        res2 = result
-        group.leave()
+        group.enter()
+        connectViaInterface(interface: "utun1", label: "VPN2") { result in
+            res2 = result
+            group.leave()
+        }
     }
 
     group.notify(queue: .main) {
-        guard let r1 = res1, let r2 = res2 else {
-            print("\n❌ One or both VPNs failed.")
-            exit(1)
-        }
+        let h1 = res1.map(sha256)
+        let h2 = res2.map(sha256)
 
-        let h1 = sha256(r1)
-        let h2 = sha256(r2)
+        print("\n--- Logic Gate: \(gate.rawValue) ---")
+        print("VPN1 Hash: \(h1 ?? "nil")")
+        print("VPN2 Hash: \(h2 ?? "nil")")
 
-        print("\nVPN1 Hash: \(h1)")
-        print("VPN2 Hash: \(h2)")
-
-        if h1 == h2 {
-            print("\n✅ AND-Verified. Responses match.\n")
-            print(r1)
+        if evaluateGate(gate, hash1: h1, hash2: h2) {
+            print("\n✅ \(gate.rawValue) condition passed.\n")
+            if let output = res1 ?? res2 {
+                print(output)
+            }
         } else {
-            print("\n❌ Responses do not match.\n")
+            print("\n❌ \(gate.rawValue) condition failed.\n")
         }
+
         exit(0)
     }
 }
 
-print("🔐 Starting dual-VPN AND logic test...")
-runAndLogic()
+// Change the logic gate here
+let selectedGate: LogicGate = .and // Options: .or, .xor, .nand, .nor, .xnor, .not
+
+print("🔐 Starting dual-VPN \(selectedGate.rawValue) logic test...")
+runLogicGateTest(selectedGate)
 RunLoop.main.run()
